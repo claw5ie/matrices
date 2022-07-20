@@ -5,55 +5,81 @@
 #include <cstring>
 #include <cstdint>
 #include <cassert>
+#include "Utils.hpp"
+#include "Matrix.hpp"
 
-template<class Type>
-Type *alloc(size_t count)
+Mat create_matrix(size_t rows, size_t cols, Allocator *allocator)
 {
-  Type *const data = (Type *)std::malloc(count * sizeof (Type));
+  Mat res = { (double *)allocate(*allocator,
+                                 rows * cols * sizeof (double)),
+              rows,
+              cols,
+              allocator };
 
-  if (data == NULL)
+  if (res.data == NULL)
   {
     std::fprintf(stderr,
-                 "ERROR: failed to allocate %zu elements of "
-                   "size %zu.\n",
-                 count,
-                 sizeof (Type));
+                 "ERROR: failed to allocate matrix with dimensions "
+                   "rows x columns = %zu x %zu.\n",
+                 rows,
+                 cols);
     std::exit(EXIT_FAILURE);
   }
 
-  return data;
+  return res;
 }
 
-double rand(double min, double max)
+void destroy(const Mat &matrix)
 {
-  return (double)std::rand() / RAND_MAX * (max - min) + min;
+  deallocate(*matrix.allocator, matrix.data);
 }
 
-struct Mat
+double &at(const Mat &matrix, size_t row, size_t column)
 {
-  double *data;
-  size_t rows;
-  size_t cols;
-};
+  assert(row < matrix.rows && column < matrix.cols);
 
-void fill_randomly(Mat &matrix)
+  return matrix.data[row * matrix.cols + column];
+}
+
+Mat copy(const Mat &matrix)
+{
+  Mat res = create_matrix(matrix.rows,
+                          matrix.cols,
+                          matrix.allocator);
+
+  std::memcpy(res.data,
+              matrix.data,
+              matrix.rows * matrix.cols * sizeof (double));
+
+  return res;
+}
+
+void fill_randomly(const Mat &matrix)
 {
   for (size_t i = matrix.rows * matrix.cols; i-- > 0; )
     matrix.data[i] = rand(-1, 1);
 }
 
-double &at(Mat &matrix, size_t row, size_t column)
+Mat multiply(const Mat &left, const Mat &right)
 {
-  assert(row < matrix.rows && column < matrix.cols);
+  assert(left.cols == right.rows);
 
-  return matrix.data[row * matrix.cols + column];
-}
+  Mat res = create_matrix(left.rows, right.cols, left.allocator);
 
-const double &at(const Mat &matrix, size_t row, size_t column)
-{
-  assert(row < matrix.rows && column < matrix.cols);
+  for (size_t i = res.rows * res.cols; i-- > 0; )
+    res.data[i] = 0;
 
-  return matrix.data[row * matrix.cols + column];
+  for (size_t i = 0; i < left.rows; i++)
+  {
+    for (size_t j = 0; j < left.cols; j++)
+    {
+      double const factor = at(left, i, j);
+      for (size_t k = 0; k < right.cols; k++)
+        at(res, i, k) += factor * at(right, j, k);
+    }
+  }
+
+  return res;
 }
 
 #define PIVOT_CLOSE_TO_ZERO 0x1
@@ -94,61 +120,6 @@ uint8_t pivot(Mat &matrix, size_t column, size_t *perms)
   return is_close_to_zero;
 }
 
-Mat copy(const Mat &matrix)
-{
-  Mat res = matrix;
-
-  size_t const count = matrix.rows * matrix.cols;
-  res.data = alloc<double>(count);
-  std::memcpy(res.data, matrix.data, count * sizeof (double));
-
-  return res;
-}
-
-Mat &multiply(Mat &dest, const Mat &left, const Mat &right)
-{
-  assert(left.cols == right.rows &&
-         dest.rows == left.rows &&
-         dest.cols == right.cols);
-
-  for (size_t i = dest.rows * dest.cols; i-- > 0; )
-    dest.data[i] = 0;
-
-  for (size_t i = 0; i < left.rows; i++)
-  {
-    for (size_t j = 0; j < left.cols; j++)
-    {
-      double const factor = at(left, i, j);
-      for (size_t k = 0; k < right.cols; k++)
-        at(dest, i, k) += factor * at(right, j, k);
-    }
-  }
-
-  return dest;
-}
-
-void print(const Mat &matrix)
-{
-  std::putchar('{');
-
-  for (size_t i = 0; i < matrix.rows; i++)
-  {
-    std::putchar('{');
-
-    for (size_t j = 0; j < matrix.cols; j++)
-    {
-      std::printf("%f%c",
-                  at(matrix, i, j),
-                  j + 1 < matrix.cols ? ',' : '}');
-    }
-
-    if (i + 1 < matrix.rows)
-      std::putchar(',');
-  }
-
-  std::putchar('}');
-}
-
 double abs(const Mat &matrix)
 {
   assert(matrix.rows == matrix.cols);
@@ -185,12 +156,23 @@ double abs(const Mat &matrix)
   return det;
 }
 
+void *malloc_or_panic(size_t size)
+{
+  void *const data = std::malloc(size);
+
+  if (data == NULL)
+    std::exit(EXIT_FAILURE);
+
+  return data;
+}
+
 Mat inverse(const Mat &matrix)
 {
   assert(matrix.rows == matrix.cols);
 
   Mat lu = copy(matrix);
-  size_t *const perms = alloc<size_t>(matrix.cols);
+  size_t *const perms =
+    (size_t *)malloc_or_panic(matrix.cols * sizeof (size_t));
 
   for (size_t i = 0; i < lu.cols; i++)
     perms[i] = i;
@@ -237,9 +219,10 @@ Mat inverse(const Mat &matrix)
       at(lu, i, j) *= factor;
   }
 
-  Mat tmp = { alloc<double>(matrix.rows * matrix.cols),
+  Mat tmp = { (double *)malloc_or_panic(matrix.rows * matrix.cols * sizeof (double)),
               matrix.rows,
-              matrix.cols };
+              matrix.cols,
+              NULL };
 
   // Multiply lower and upper matrices.
   for (size_t i = matrix.rows * matrix.cols; i-- > 0; )
@@ -266,25 +249,30 @@ Mat inverse(const Mat &matrix)
                 matrix.cols * sizeof (double));
   }
 
-  delete[] tmp.data;
-  delete[] perms;
+  std::free(tmp.data);
+  std::free(perms);
 
   return lu;
 }
 
-int main()
+void print(const Mat &matrix)
 {
-  Mat x = { NULL, 8, 8 };
-  x.data = alloc<double>(x.rows * x.cols);
-  Mat res = { NULL, x.rows, x.cols };
-  res.data = alloc<double>(res.rows * res.cols);
+  std::putchar('{');
 
-  fill_randomly(x);
-  Mat inv = inverse(x);
-  print(multiply(res, inv, x));
-  std::putchar('\n');
+  for (size_t i = 0; i < matrix.rows; i++)
+  {
+    std::putchar('{');
 
-  delete[] x.data;
-  delete[] res.data;
-  delete[] inv.data;
+    for (size_t j = 0; j < matrix.cols; j++)
+    {
+      std::printf("%f%c",
+                  at(matrix, i, j),
+                  j + 1 < matrix.cols ? ',' : '}');
+    }
+
+    if (i + 1 < matrix.rows)
+      std::putchar(',');
+  }
+
+  std::putchar('}');
 }
